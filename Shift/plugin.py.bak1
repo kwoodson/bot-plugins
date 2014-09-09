@@ -1,0 +1,502 @@
+###
+# Copyright (c) 2002-2005, Jeremiah Fincher
+# Copyright (c) 2009, James Vega
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#   * Redistributions of source code must retain the above copyright notice,
+#     this list of conditions, and the following disclaimer.
+#   * Redistributions in binary form must reproduce the above copyright notice,
+#     this list of conditions, and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#   * Neither the name of the author of this software nor the name of
+#     contributors to this software may be used to endorse or promote products
+#     derived from this software without specific prior written consent.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+###
+
+import sys
+
+import supybot.conf as conf
+import supybot.ircdb as ircdb
+import supybot.utils as utils
+from supybot.commands import *
+import supybot.ircmsgs as ircmsgs
+import supybot.schedule as schedule
+import supybot.ircutils as ircutils
+import supybot.callbacks as callbacks
+import sqlite3
+import collections
+import urllib2
+import time
+import mechanize
+import subprocess
+import shutil
+import os
+import datetime
+
+RED="\x034"
+GREEN="\x033"
+BLACK="\x03"
+
+OPENSHIFT_UNAME= ''
+OPENSHIFT_PASS = ''
+
+#global DB
+#DB = sqlite3.connect("/home/kwoodson/python/Supybot-0.83.4.1/plugins/Shift/shift_builds.db")
+#Build = collections.namedtuple("Build", ["id", "name", "status", "date", \
+                               #"duration", "link", "commit"])
+global OPENSHIFT_URL
+#OPENSHIFT_URL=urllib2.urlparse.urlparse("http://www.openshift.com/app")
+OPENSHIFT_URL=urllib2.urlparse.urlparse("http://openshift.redhat.com")
+
+import pdb
+
+
+class Shift(callbacks.PluginRegexp):
+    regexps = ['shiftSnarfer']
+
+    def __init__(self, irc):
+        self.__parent = super(Shift, self)
+        self.__parent.__init__(irc)
+        self.irc = irc
+        #self.current_build = (0,None)
+
+        self.invites = {}
+
+    def _sendMsg(self, irc, msg):
+        irc.queueMsg(msg)
+        irc.noReply()
+
+    def _sendMsgs(self, irc, nicks, f):
+        numModes = irc.state.supported.get('modes', 1)
+        for i in range(0, len(nicks), numModes):
+            irc.queueMsg(f(nicks[i:i + numModes]))
+        irc.noReply()
+
+#    def get_last_completed_build(self):
+#        global DB
+#        res = DB.execute("select * from builds order by id desc").fetchall()
+#        rval = None
+#        for build in [Build(*b) for b in res]:
+#            if "success" in build.status.lower() or \
+#               "failure" in build.status.lower():
+#                return build
+#            else:
+#                next
+#        return rval
+#
+#    def get_all_builds(self):
+#        global DB
+#        res = DB.execute("select * from builds order by id desc").fetchall()
+#        return [Build(*b) for b in res]
+#
+#    def get_build_by_build_number(self, build_number):
+#        global DB
+#        res = DB.execute("select * from builds where id = '%s'"%build_number).fetchall()[0]
+#        #print res
+#        return Build(*res)
+#
+#    def get_last_build(self,query=None):
+#        global DB
+#        if query and query.lower() in ["success","failure"]:
+#            res = DB.execute("select * from builds where status='%s' " \
+#                        "order by id desc limit 0, 1"%query.upper()).fetchall()[0]
+#        else:
+#            res = DB.execute("select * from builds order by id desc limit 0, 1").fetchall()[0]
+#        #print res
+#        return Build(*res)
+
+    def shiftSnarfer(self, irc, msg, match):
+        r"(^all:|^.* all:)(.*)$"
+        try:
+            matches = match.groups()
+            author = str(msg).split("!")[0].lstrip(":")
+            channel = msg.args[0]
+            #L = list(irc.state.channels.values()[0].users)
+            L = list(irc.state.channels[channel].users)
+            L = list(set(L) - set([irc.nick, author]))
+            if len(": ".join(L)) < 450:
+            #L.remove(irc.nick)
+            #L.remove(author)
+                irc.reply("%s: %s"%(": ".join(L), "".join(matches)),  \
+                          prefixNick=False)
+            else:
+                rep_str = ""
+                while len(L) > 0:
+                    if len(rep_str) + len(L[-1]) + len(": ") + \
+                    len("".join(matches)) < 400:
+                        rep_str = rep_str + L.pop() + ": "
+                    else:
+                        irc.reply("%s: %s"%(rep_str, "".join(matches)),  \
+                                  prefixNick=False)
+                        rep_str = ""
+                else:
+                    if len(rep_str) > 0:
+                        irc.reply("%s: %s"%(rep_str, "".join(matches)),  \
+                                  prefixNick=False)
+        except:
+            print sys.exc_info()
+            irc.noReply()
+
+#    def build(self, sqlquery=None, query=None):
+#        """
+#        Abstracted method to return details about builds.
+#        """
+#        build_str = None
+#        rcommits = None
+#        try:
+#            build = self.get_last_build(sqlquery)
+#            build_str =  "< Libra Build: %s"%build.id
+#            color = BLACK
+#            if "FAILURE" in build.status:
+#                #color = "\x034"
+#                color = RED
+#            elif build.status.lower() in ["success", "building"]:
+#                #color = "\x033"
+#                color = GREEN
+#            build_str += " Status: %s%s\x03"%(color,build.status)
+#            date = build.date.split("_")
+#            date[1] = date[1].replace("-",":")
+#            build_str += " Date: %s"%" ".join(date)
+#            build_str += " " + build.link + " >"
+#            if query == "details":
+#                #commits = "Changes: https://ci.dev.openshift.redhat.com/jenkins/job/libra_check/%s/changes/" \
+#                    #% build.id
+#                commits = build.commit.split("$$")
+#                if len(commits) > 3:
+#                    rcommits = "Changes: https://ci.dev.openshift.redhat.com/jenkins/job/libra_check/%s/changes/" % build.id
+#                else:
+#                    print build.commit
+#                    rcommits = " Commits: "
+#                    for c in commits:
+#                        rcommits += " ".join(c.split("|"))
+#
+#            return (build_str, rcommits)
+#        except:
+#            print sys.exc_info()
+#
+#    def lastfail(self, irc, msg, args):
+#        """
+#
+#        Return latest failed build.
+#        """
+#        try:
+#            rstr = self.build(sqlquery="failure")
+#            irc.reply(rstr[0], prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    lastfail = wrap(lastfail)
+
+#    def lastgood(self, irc, msg, args):
+#        """
+#
+#        Return latest Successful build.
+#        """
+#        try:
+#            rstr = self.build(sqlquery="success")
+#            irc.reply(rstr[0], prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    lastgood = wrap(lastgood)
+#
+#    def successcnt(self, irc, msg, args):
+#        """
+#
+#        Return the number of successful builds in-a-row.
+#        """
+#        try:
+#            count = 0
+#            for b in self.get_all_builds():
+#                print b.id 
+#                if b.status.lower() == "success":
+#                    count += 1
+#                elif b.status.lower() == "building":
+#                    next
+#                else:
+#                    break
+#
+#            irc.reply(count, prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    successcnt = wrap(successcnt)
+#
+#    def failcnt(self, irc, msg, args):
+#        """
+#
+#        Return the number of failed builds in-a-row.
+#        """
+#        try:
+#            count = 0
+#            for b in self.get_all_builds():
+#                print b.id 
+#                if b.status.lower() == "failure":
+#                    count += 1
+#                elif b.status.lower() == "building":
+#                    next
+#                else:
+#                    break
+#
+#            irc.reply(count, prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    failcnt = wrap(failcnt)
+#
+#    def last(self, irc, msg, args):
+#        """
+#
+#        Return latest build.
+#        """
+#        try:
+#            rstr = self.build()
+#            irc.reply(rstr[0], prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    last = wrap(last)
+#
+#    def details(self, irc, msg, args, build_num=None):
+#        """
+#
+#        Return details about latest build.
+#        """
+#        try:
+#            if build_num:
+#                build_str = self.build_num_details(build_num)
+#                rstr = "".join(build_str)
+#                print build_str
+#                irc.reply(rstr, prefixNick=False)
+#            else:
+#                results = self.build(None,"details")
+#                for result in results:
+#                    irc.reply(result, prefixNick=False)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#    details = wrap(details)
+#
+#    def build_num_details(self, build):
+#        bn = int(build)
+#        build = self.get_build_by_build_number(build)
+#        build_str =  "<Libra Build: %s"%build.id
+#        color = GREEN
+#        if "FAILURE" in build.status:
+#            color = RED
+#        build_str += " Status: %s%s\x03"%(color,build.status)
+#        date = build.date.split("_")
+#        date[1] = date[1].replace("-",":")
+#        build_str += " Date: %s"%" ".join(date)
+#        build_str += " " + build.link + " >"
+#        commit_list = build.commit.split("$$")
+#        commits = ""
+#        for c in commit_list:
+#            commits += " ".join(c.split("|"))
+#        #commits = " Commit: ".join(commits)
+#        return (build_str , commits)
+#
+#    def buildnum(self, irc, msg, args, build_num):
+#        """["buildnumber"]
+#
+#        Return information about a specific build.
+#        """
+#        try:
+#            build_str = self.build_num_details(build_num)
+#            irc.reply("".join(build_str), prefixNick=False)
+#
+#        except:
+#            print sys.exc_info()
+#            irc.reply("Please pass in a valid build number")
+#
+#    buildnum = wrap(buildnum,["text"])
+
+#    def notifier(self, irc, msg, args, on):
+#        """["on"] or ["off"]
+#
+#        Turn on build notifications
+#        """
+#        def build_event():
+#            #This is the function we will use so that we will get notifications
+#            #about the build failure.  It will probably be annoying but we want 
+#            #to spam the channel every X minutes until we acknowledge the 
+#            #failure.
+#            #pdb.set_trace()
+#            #irc = None
+#            try:
+#                build = self.get_last_completed_build()
+#                if not build:
+#                    return
+#                print "Checking latest build (%s,%s) == stored (%s)"% (build.id,build.status, self.current_build)
+#                if build and (build.id,build.status) != self.current_build:
+#                    print "Updating in channel"
+#                    self.current_build = (build.id,build.status)
+#                    build_str =  "Libra Build: %s"%build.id
+#                    color = GREEN
+#                    if "FAILURE" in build.status:
+#                        color = RED
+#                    build_str += " Status: %s%s\x03"%(color,build.status)
+#                    date = build.date.split("_")
+#                    date[1] = date[1].replace("-",":")
+#                    #build_str += " Date: %s"%" ".join(date)
+#                    build_str += " (Info: .Shift buildnum %s)"% build.id
+#                    #Here for channel notifying
+#                    irc.queueMsg(ircmsgs.privmsg("#libra", build_str))
+#                    irc.queueMsg(ircmsgs.privmsg("#kbot", build_str))
+#            except:
+#                print sys.exc_info()
+#                irc.noReply()
+#        try:
+#            EVENT_TIMER = (60 * 3)
+#            if on.lower() == "on":
+#                try:
+#                    schedule.addPeriodicEvent(build_event, EVENT_TIMER, "build_event")
+#                    irc.reply("Build Notifier turned on.")
+#                except:
+#                    irc.reply("Build Notifier already running.")
+#            elif on.lower() == "off":
+#                schedule.removePeriodicEvent("build_event")
+#                irc.reply("Build Notifier turned off.")
+#            else:
+#                irc.reply("Build Notifier: I don't understand [ %s ]."%on)
+#        except:
+#            print sys.exc_info()
+#            irc.noReply()
+#
+#    notifier = wrap(notifier, ['text'])
+
+    def httplogin(self, irc, msg, args):
+        """
+
+        Login into response times of openshift.redhat.com
+        """
+        try:
+            st_time = time.time()
+            br = mechanize.Browser()
+            br.open(OPENSHIFT_URL.geturl()+"/app/login")
+            br.select_form(nr=0)
+            br.form['web_user[rhlogin]'] = OPENSHIFT_UNAME
+            br.form['web_user[password]'] = OPENSHIFT_PASS
+            results = br.submit()
+            end_time = time.time() - st_time
+            if results:
+                irc.reply("Status: %s Duration: %s"%(results._headers['status'],end_time))
+            else:
+                raise Exception("Could not retrieve www.openshift.com")
+                irc.reply("Exception occurred. Check bot logs")
+        except:
+            print sys.exc_info()
+            irc.noReply()
+    httplogin = wrap(httplogin)
+    #httplogin = wrap(httplogin, ['text'])
+
+    def http(self, irc, msg, args):
+        """
+
+        Check http response times of openshift.redhat.com
+        """
+        try:
+            st_time = time.time()
+            results = urllib2.urlopen(OPENSHIFT_URL.geturl())
+            end_time = time.time() - st_time
+            if results:
+                irc.reply("Status: %s Duration: %s"%(results.headers['status'],end_time))
+            else:
+                raise Exception("Could not retrieve www.openshift.com")
+                irc.reply("Exception occurred. Check bot logs")
+        except:
+            print sys.exc_info()
+            irc.noReply()
+    http = wrap(http)
+    #http = wrap(http, ['text'])
+
+    def create(self, irc, msg, args):
+        """
+        Create an application on openshift
+        """
+        def do_create():
+            try:
+                irc.reply("Creating app")
+                st_time = time.time()
+                p = subprocess.Popen(['rhc', 'app', 'create', "-a","libot", "-t",
+                            "jbossas-7", "-p", OPENSHIFT_PASS, "-l",
+                            OPENSHIFT_UNAME, "-n"], 
+                            stdout=subprocess.PIPE)
+                p.wait()
+                #pdb.set_trace()
+                if p.returncode == 0:
+                    #now that the site exists, hit it and return the code
+                    codes = []
+                    for i in range(3):
+                        time.sleep(3)
+                        results = urllib2.urlopen("http://libot-kwoodson.rhcloud.com")
+                        if results:
+                            codes.append(results.code)
+                            if codes[-1] == 200:
+                                #success, report and then delete it
+                                irc.reply("Creation success.")
+                                break
+                    else:
+                        irc.reply("Creation status unknown.")
+                    irc.reply("HTTP Status: %s"%codes[-1])
+
+                else:
+                    irc.reply("Error during create. Returncode %s"%p.returncode)
+                    print p.communicate()
+                    #raise Exception("Error during create.")
+
+                try:
+                    shutil.rmtree("libot")
+                    if os.path.exists("libot"):
+                        print "libot dir did not clean up"
+                except:
+                    pass
+                #now destroy the app
+                p = subprocess.Popen(['rhc', 'app', 'destroy', "-a","libot", "-b",
+                                      "-p", OPENSHIFT_PASS, "-l", OPENSHIFT_UNAME], 
+                                      stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+                p.wait()
+                if p.returncode != 0:
+                    #Error destroying, notify
+                    irc.reply("Error during destroy. Returncode %s"%p.returncode)
+                    print p.communicate()
+                    raise Exception("Error during destroy.")
+
+                end_time = time.time() - st_time
+                irc.reply("Destory successful. Duration: %s" % end_time)
+
+            except:
+                print sys.exc_info()
+                irc.noReply()
+        try:
+            EVENT_TIMER = (time.time() + 3)
+            try:
+                schedule.addEvent(do_create, EVENT_TIMER)
+                irc.reply("Scheduled an app create.")
+            except:
+                irc.reply("Error in scheduler.")
+        except:
+            print sys.exc_info()
+            irc.noReply()
+    create = wrap(create)
+
+Class = Shift
+
+# vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
